@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
-from scipy.optimize import minimize, curve_fit
+from scipy.optimize import minimize
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_squared_log_error, median_absolute_error
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -11,7 +11,7 @@ from collections import Counter
 import matplotlib.pyplot as plt
 import itertools
 
-class CurveFitter:
+class CurveParamFit:
     """
     Class to fit a curve to a dataset using a variety of curve types.
     The class uses a cross-validated approach to select the best curve type and the best set of variables.
@@ -197,20 +197,7 @@ class CurveFitter:
             winit = np.concatenate((self.init_params[curvename], xinit.values))  
         else:
             assert len(winit) == len(self.init_params[curvename]) + x.shape[1], "Invalid initial parameters"
-        # Bounds setup 
-        # To make the convergence easier, bound the exponential parameters to a reasonable range
-        # _Kepmin = np.log(1e-4) / M
-        # _Kepmax = np.log(1e3) / M
-        # lb = [None for _ in range(len(winit) - x.shape[1])] + list(_Kepmin.values)
-        # ub = [None for _ in range(len(winit) - x.shape[1])] + list(_Kepmax.values)
-        # bounds = list(zip(lb, ub)) 
-        # , method='L-BFGS-B', bounds=bounds
-        #if q == 0.5 and x.shape[1] == 1:
-        #    # When q=0.5 and a single independent variable, use curve_fit
-        #    def func(xdata, *params):
-        #        return self.curve(xdata.reshape(-1, 1), np.array(params), curvename)  # Ensure xdata is 2D
-        #    popt, _ = curve_fit(func, x.squeeze().values, y, p0=winit)  # squeeze x to 1D for curve_fit
-        #else:
+
         # Use minimize for other cases
         result = minimize(self.loss, winit, args=(curvename, x, y, q))
         popt = result.x
@@ -488,7 +475,7 @@ class CurveFitter:
             _, ax = plt.subplots(1, 1)
 
         ax.scatter(self.x_raw[self.main_indep_var], self.y, label='Data')
-        ax.plot(self.x_raw[self.main_indep_var], ypred, 'r-', label='Fitted function')
+        ax.plot(self.x_raw[self.main_indep_var], ypred, 'r-', label='Predicted')
         ax.set_xlabel(self.main_indep_var_name)
         ax.set_ylabel(self.dep_var_name)
         ax.set_title(title)

@@ -13,7 +13,6 @@ class AdditiveFit:
                  main_indep_var :str,
                  dep_var_name: str = None,                 
                  main_indep_var_name: str = None,
-                 constant: bool = True,
                  curves = ['logistic', 'redLogistic',
                            'fixLogistic', 'doubleExp',
                            'exponential', 'fixExponential',
@@ -47,12 +46,10 @@ class AdditiveFit:
         self.x_min = x.min()
         self.x_max = x.max()
         self.x_raw = x
-        self.x = (x - self.x_min) / (self.x_max - self.x_min)
-        
-        # add constant column if requested
-        if constant:
-            self.constant = True
-            self.x.insert(0, 'constant', 1)
+        self.x = x / (self.x_max - self.x_min)
+        self.excess_reserves = self.x[self.main_indep_var]
+        self.exogs = self.x.drop(columns=[self.main_indep_var])
+
         
         self.Q = Q
         self.nFolds = nFolds
@@ -61,14 +58,14 @@ class AdditiveFit:
         self.search_method = search_method
         
         curves = {
-            "logistic": self._logistic,
-            "redLogistic": self._redLogistic,
-            "fixLogistic": self._fixLogistic,
-            "doubleExp": self._doubleExp,
-            "exponential": self._exponential,
-            "fixExponential": self._fixExponential,
-            "arctan": self._arctan,
-            "linear": self._linear
+            "logistic": _logistic,
+            "redLogistic": _redLogistic,
+            "fixLogistic": _fixLogistic,
+            "doubleExp": _doubleExp,
+            "exponential": _exponential,
+            "fixExponential": _fixExponential,
+            "arctan": _arctan,
+            "linear": _linear
         }
         param_names = {
             # Names of parameters for each curve type
@@ -79,7 +76,7 @@ class AdditiveFit:
             "exponential": ["alpha", "beta"],
             "fixExponential": ["beta"],
             "arctan": ["alpha", "beta"],
-            "linear": []
+            "linear": ["alpha", "beta"]
         }
 
         self.curves = {_c: curves[_c] for _c in curves}
@@ -87,3 +84,36 @@ class AdditiveFit:
 
         self.varselect_result = pd.DataFrame()
         return None
+    
+    def curveOpt(self, curvename, x, y):
+        
+        p0 = -1* np.ones(len(self.param_names[curvename]))
+        curvefunc = self.curves[curvename]
+        
+        popt, pcov = curve_fit(curvefunc, x, y, p0=p0)
+        return popt, pcov
+
+# Helper functions
+def _logistic(x, alpha, beta, kappa):
+    return alpha + kappa / (1 - beta * np.exp(x))
+
+def _redLogistic(x, alpha, beta):
+    return alpha + 1 / (1 - beta * np.exp(x))
+
+def _fixLogistic(x, alpha):
+    return alpha + 1 / (1 - np.exp(x))
+
+def _doubleExp(x, alpha, beta, rho):
+    return alpha + beta * np.exp(rho * np.exp(x))
+
+def _exponential(x, alpha, beta):
+    return alpha + beta * np.exp(x)
+
+def _fixExponential(x, beta):
+    return beta * np.exp(x)
+
+def _arctan(x, alpha, beta):
+    return alpha + beta * np.arctan(x)
+
+def _linear(x):
+    return alpha + beta *x
