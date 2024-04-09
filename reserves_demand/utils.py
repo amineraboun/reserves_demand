@@ -22,3 +22,22 @@ def evaluate_metrics(y_true, y_pred):
         'MedianAE': median_absolute_error(y_true, y_pred)
     }
     return pd.Series(metrics)
+
+def mis(y, yqlb, yqub, Q):
+    return ((yqub - yqlb) + (2 / Q) * (yqlb - y) * (y < yqlb) + (2 / Q) * (y - yqub) * (y > yqub)).mean()
+
+def perf_metrics(y, ypred, yqlb, yqub, q):
+    """
+    Computes performance metrics for the fitted curve.
+    The performance metrics include 
+        RMSE: Root Mean Squared Error
+        MAE: Mean Absolute Error
+        MAPE: Mean Absolute Percentage Error
+        R2: R-squared
+        MSLE: Mean Squared Log Error
+        MedianAE: Median Absolute Error
+        MIS: Mean Interval Score
+    """
+    metrics = evaluate_metrics(y, ypred)
+    metrics['MIS'] = mis(y, yqlb, yqub, q)
+    return metrics

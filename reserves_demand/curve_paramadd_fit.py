@@ -11,7 +11,7 @@ from collections import Counter
 import matplotlib.pyplot as plt
 import itertools
 
-class CurveParamFit:
+class CurveParamAdditiveFit:
     """
     Class to fit a curve to a dataset using a variety of curve types.
     The class uses a cross-validated approach to select the best curve type and the best set of variables.
@@ -74,7 +74,6 @@ class CurveParamFit:
                  main_indep_var :str,
                  dep_var_name: str = None,                 
                  main_indep_var_name: str = None,
-                 constant: bool = True,
                  curves:list = None,
                  Q: float = 0.9,
                  nFolds: int=5,
@@ -100,17 +99,13 @@ class CurveParamFit:
         
         self.main_indep_var = main_indep_var
         self.main_indep_var_name = main_indep_var_name if main_indep_var_name is not None else main_indep_var
-        
+        self.other_indep_vars = list(x.columns.difference([main_indep_var]))
+
         # Normalize x to make the optimization easier
         self.x_min = x.min()
         self.x_max = x.max()
         self.x_raw = x
         self.x = x  / (self.x_max - self.x_min)
-        
-        # add constant column if requested
-        if constant:
-            self.constant = True
-            self.x.insert(0, 'constant', 1)
         
         self.Q = Q
         self.nFolds = nFolds
@@ -137,18 +132,18 @@ class CurveParamFit:
             "exponential": ["alpha", "beta"],
             "fixExponential": ["beta"],
             "arctan": ["alpha", "beta"],
-            "linear": []
+            "linear": ["alpha"]
         }
         init_params = {
             # Initial parameters for each curve type
-            "logistic": np.array([0, 1, 0]),
-            "redLogistic": np.array([0, 1]),
+            "logistic": np.array([0, 0.1, 0]),
+            "redLogistic": np.array([0, 0.1]),
             "fixLogistic": np.array([0.1]), 
             "doubleExp": np.array([0, 0.1, -0.1]),
             "exponential": np.array([0, 0.1]), 
             "fixExponential": np.array([0.1]),
-            "arctan": np.array([.1, -.1]), 
-            "linear": np.array([])
+            "arctan": np.array([0.1, -0.1]), 
+            "linear": np.array([0.1])
         }
         if curves is None:
             curves = list(curves.keys())
@@ -182,20 +177,25 @@ class CurveParamFit:
         plt.tight_layout()
         plt.show()
         return None
-
+        
     def curve(self, x, w, curvename):
         """Applies the specified curve function to the input data x."""
         assert curvename in self.curves, f"Invalid curve type. Must be one of: {', '.join(self.curves.keys())}"
-        p = x.shape[1]
-        b = w[-p:]
-        g = self._gX(x, b)
-        return np.nan_to_num(self.curves[curvename](w, g))
         
-    def loss(self, w, curvename, x, y, q):
-        """Computes the quantile loss for curve fitting."""
-        ypred = self.curve(x, w, curvename)
-        e = y - ypred
-        return np.maximum(q * e, (q - 1) * e).mean()
+        assert self.main_indep_var in x.columns, f"{self.main_indep_var} not found in the dataset"
+        main_x = x[self.main_indep_var]
+        p1 = len(self.param_names[curvename])
+        # function contribution
+        funccontrib = np.nan_to_num(self.curves[curvename](w[:p1], w[p1]*main_x))
+        
+        # other exog variables contribution
+        other_x = x.drop(columns=[self.main_indep_var])
+        if other_x.empty:
+            return funccontrib
+        else:
+            p2 = other_x.shape[1]
+            exogcontrib = self._gX(other_x, w[-p2:])
+            return funccontrib + exogcontrib
 
     def curveOpt(self, curvename, x, y, q, winit=None, verbose=False):
         """Optimizes the curve parameters for the given data and curve type."""
@@ -216,6 +216,12 @@ class CurveParamFit:
             print(f"Optimization failed for {curvename} curve with message: {result.message}")
 
         return popt
+    
+    def loss(self, w, curvename, x, y, q):
+        """Computes the quantile loss for curve fitting."""
+        ypred = self.curve(x, w, curvename)
+        e = y - ypred
+        return np.maximum(q * e, (q - 1) * e).mean()
 
     def _run_fold(self, train_index, test_index, columns, curvename):
         """Executes a single fold of cross-validation for the given columns and curve."""
@@ -297,41 +303,46 @@ class CurveParamFit:
 
         return best_combination, best_train_metrics, best_validation_metrics
 
+
     def cross_validate(self, curvename, on='RMSE'):
         """Performs cross-validation to find the best combination of variables for the specified curve type."""
         perf_stats = ['RMSE', 'MAE', 'MAPE', 'R2', 'MSLE', 'MedianAE']
         assert on in perf_stats, f'Performance comparison is made on one of the following metrics {perf_stats}'
-        columns = list(self.x.columns)
-    
+        columns = list(self.other_indep_vars)        
+
         # Generate combinations based on the specified search method
         if self.search_method in ['backward', 'forward']:
-            best_combination = columns[:] if self.search_method == 'backward' else []
             
-            if self.search_method == 'backward':
-                best_train_metrics, best_validation_metrics = self._run_cv(best_combination, curvename)
-                best_validation_metric_value = best_validation_metrics[on]
-            else:
-                best_validation_metric_value = np.inf  # Initialize for minimization
-                best_combination, best_train_metrics, best_validation_metrics = None, None, None
+            # Initialize the best combination with the result of all the columns in the backward setup 
+            # or the main independent variable in the forward setup 
+            best_combination = [self.main_indep_var] if self.search_method == 'forward' else [self.main_indep_var] + columns
             
+            best_train_metrics, best_validation_metrics = self._run_cv(best_combination, curvename)
+            best_validation_metric_value = best_validation_metrics[on]
+
             while True:
                 # Generate candidate combinations for the next iteration
                 if self.search_method == 'backward':
-                    candidate_columns = [best_combination[:i] + best_combination[(i + 1):] for i in range(len(best_combination))] 
+                    _eligb_columns = [c for c in best_combination if c != self.main_indep_var]
+                    if len(_eligb_columns) ==0:
+                        candidate_combinations = [[self.main_indep_var]]
+                    else:
+                        candidate_combinations = [[self.main_indep_var] + list(comb) for comb in itertools.combinations(_eligb_columns, len(_eligb_columns) - 1)] 
                 else:
-                    candidate_columns = [best_combination + [c] for c in columns if c not in best_combination]
-                
-                # If no candidate combinations are available, break from the loop
-                if not candidate_columns:
-                    break
+                    candidate_combinations = [best_combination + [c] for c in columns if c not in best_combination]
                 
                 # Find the best combination from the candidates
-                candidates_best_combination, candidates_best_train_metrics, candidates_best_validation_metrics = self._find_best_combination(candidate_columns, curvename, on)
+                candidates_best_combination, candidates_best_train_metrics, candidates_best_validation_metrics = self._find_best_combination(candidate_combinations, curvename, on)
                 if candidates_best_validation_metrics[on] < best_validation_metric_value:
                     best_combination, best_train_metrics, best_validation_metrics = candidates_best_combination, candidates_best_train_metrics, candidates_best_validation_metrics
                     best_validation_metric_value = best_validation_metrics[on]
                 else:
                     break
+
+                # If no candidate combinations are available, break from the loop
+                if (self.search_method == 'backward'):
+                    if (not _eligb_columns):
+                        break
                 
                 # In forward search, remove selected columns from the list of remaining columns
                 if self.search_method == 'forward' and best_combination:
@@ -341,7 +352,12 @@ class CurveParamFit:
 
         elif self.search_method == 'all_combinations':
             # Evaluate all possible combinations of columns
-            all_combinations = [list(c) for i in range(1, len(columns) + 1) for c in itertools.combinations(columns, i)]
+            if len(columns) > 1:
+                all_combinations = [[self.main_indep_var]] + [[self.main_indep_var] +list(c) for i in range(1, len(columns) + 1) for c in itertools.combinations(columns, i)]
+            elif len(columns) == 1:
+                all_combinations = [[self.main_indep_var], [self.main_indep_var] + columns]
+            else:
+                all_combinations = [[self.main_indep_var]]
             best_combination, best_train_metrics, best_validation_metrics = self._find_best_combination(all_combinations, curvename, on)
 
         # Return the best combination of features and the corresponding training and validation metrics
@@ -522,9 +538,6 @@ class CurveParamFit:
         else:
             # normalize the data
             X = X / (self.x_max - self.x_min)
-            # add constant column if requested
-            if self.constant:
-                X.insert(0, 'constant', 1)
 
         _params = self.best_curves_params[curvename]       
         ypred, yqlb, yqub, X = self.predict(curvename, X, _params['vars'], _params['avg'], _params['upper'], _params['lower'])
@@ -605,4 +618,5 @@ class CurveParamFit:
         return alpha + beta * np.arctan(g)
 
     def _linear(self, w, g):
-        return g
+        alpha = w[0]
+        return alpha + g

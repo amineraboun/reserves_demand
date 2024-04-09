@@ -11,14 +11,28 @@ from sklearn.metrics import make_scorer, mean_squared_error
 from reserves_demand.utils import evaluate_metrics
 
 class CurveNonParamFit:
+    """
+    This class is used to fit a non-parametric curve to a dataset using two different models:
+        - Generalized Additive Models (GAM) with splines
+        - Random Forest
     
+    In a cross-validation setting, the class compares the performance of the two models based on a specified metric.
+        - The GAM models test different model types for curve fitting (linear, logistic, gamma) and different number of splines, 
+    then picks the best model.
+        - The Random Forest model tests different hyperparameters (n_estimators, max_depth, min_samples_split, min_samples_leaf), 
+    then picks the best model.
+
+    Finally, the class compares the best GAM model with the best Random Forest model based on the specified metric, and chooses the best model.
+    Forecasting can be done either using the best model, or the best set-up for the GAM and Random Forest model families. 
+    The class provides a method to plot the best model's predictions.
+    """
     def __init__(self, 
                  data: pd.DataFrame, 
                  dep_var: str,
                  main_indep_var :str,
                  dep_var_name: str = None,                 
                  main_indep_var_name: str = None,
-                 nFolds=5,
+                 nFolds:int=5,
                  ):
         assert isinstance(data, pd.DataFrame), "data must be a DataFrame"
         assert dep_var in data.columns, f"{dep_var} not found in the dataset"
@@ -45,15 +59,67 @@ class CurveNonParamFit:
         self.nFolds = nFolds
         
         # Split data
-        self.X_train, self.X_val, self.y_train, self.y_val = train_test_split(self.x, self.y, test_size=0.2, random_state=42)
+        self.X_train, self.X_val, self.y_train, self.y_val = train_test_split(
+            self.x, self.y, test_size=0.2, random_state=42)
 
         self.best_gam = None
         self.best_rf = None
         self.best_model = None
+        self.best_model_type = None
         return None 
     
-    def tune_gam(self, param_grid = None, verbose=False):
+    def plot_x_y(self, title =''):
+        """
+        Plots the dependent variable y against all the independent variables x.
+
+        Parameters:
+        -----------
+            title: str, default=''
+                The title of the plot.
+
+        Returns:
+        --------
+            None
+        """
         
+        nplots = self.x_raw.shape[1]
+        ncols = 1 if nplots == 1 else 2
+        nrows = int(np.ceil(nplots/ncols))
+        _ = plt.subplots(nrows,ncols, figsize = (ncols*5, nrows*5))
+        for i, col in enumerate(self.x_raw.columns):
+            ax = plt.subplot(nrows,ncols, i+1)
+            ax.scatter(self.x_raw[col], self.y)
+            ax.set_xlabel(col)
+            ax.set_ylabel(self.dep_var_name)
+        if title == '':
+            title = f"{self.dep_var_name} against independent variables"
+        plt.suptitle(title)        
+        plt.subplots_adjust(top=0.9)
+        plt.tight_layout()
+        plt.show()
+        return None
+    
+    def tune_gam(self, param_grid = None, verbose=False):
+        """
+        A function to tune the GAM model using GridSearchCV.
+        
+        Parameters:
+        -----------
+            param_grid: dict, default=None
+                A dictionary containing the hyperparameters to tune. If None, the function will test different model types,
+                number of splines, and regularization parameters.
+            verbose: bool, default=False
+                If True, prints the best parameters found and the best score from GridSearchCV.
+
+        Returns:
+        --------
+            opt_param: dict
+                The optimal parameters found by GridSearchCV.
+            train_metrics: dict
+                The performance metrics on the training set.
+            val_metrics: dict
+                The performance metrics on the validation set.         
+        """
         # Define parameter grid, including model_type to test different GAMs
         if param_grid is None:
             param_grid = {
@@ -88,7 +154,26 @@ class CurveNonParamFit:
         return opt_param, train_metrics, val_metrics
 
     def tune_rf(self, param_grid=None, verbose=False):
-        
+        """
+        A function to tune the Random Forest model using GridSearchCV.
+
+        Parameters:
+        -----------
+            param_grid: dict, default=None
+                A dictionary containing the hyperparameters to tune. If None, the function will test different n_estimators,
+                max_depth, min_samples_split, and min_samples_leaf.
+            verbose: bool, default=False
+                If True, prints the best parameters found and the best score from GridSearchCV.
+
+        Returns:
+        --------
+            opt_param: dict
+                The optimal parameters found by GridSearchCV.
+            train_metrics: dict
+                The performance metrics on the training set.
+            val_metrics: dict
+                The performance metrics on the validation set.
+        """        
         # Define the parameter grid for Random Forest
         if param_grid is None:
             param_grid = {
@@ -119,9 +204,23 @@ class CurveNonParamFit:
 
     def compare_models(self, on='RMSE', verbose=True, plot=True):
         """
-        Compares models (GAM splines and Random Forest) on the same train-validation set,
-        picks the best parameters for each, and then compares the two models based on the specified metric.
-        Returns the performance metrics for each model type and identifies the best model.
+        A function to compare the performance of GAM and Random Forest models based on a specified metric.
+
+        Parameters:
+        -----------
+            on: str, default='RMSE'
+                The metric to compare the models on. Options: 'RMSE', 'MAE', 'R2'
+            verbose: bool, default=True
+                If True, prints the best model based on the specified metric and the comparison results.
+            plot: bool, default=True
+                If True, plots a comparison of the specified metric for different models.
+
+        Returns:
+        --------
+            best_model_type: str
+                The best model based on the specified metric.
+            comparison_result: pd.DataFrame
+                A DataFrame containing the comparison results of the two models based on the specified metric.
         """
         results = []
         model_types = ['GAM Splines', 'Random Forest']
@@ -132,9 +231,7 @@ class CurveNonParamFit:
                 print(f"Running cross-validation for {model_type} model")
                 print('=' * 50)
             
-            # Perform cross-validation and gather metrics. This is a placeholder,
-            # replace with your actual cross-validation logic for GAM and Random Forest.
-            # Example:
+            # Perform cross-validation and gather metrics. 
             if model_type == 'GAM Splines':
                 opt_param, train_metrics, val_metrics = self.tune_gam()
             elif model_type == 'Random Forest':
@@ -149,18 +246,24 @@ class CurveNonParamFit:
             
             if verbose:
                 print(f"Best parameters for {model_type}: {opt_param}")
-                print("Training Metrics:", train_metrics)
-                print("Validation Metrics:", val_metrics)
+                print("Training Metrics:")
+                print(train_metrics)
+                print("\nValidation Metrics:")
+                print(val_metrics)
                 print('\n')
 
-        comparison_result = pd.DataFrame(results)  # Convert results to DataFrame for easier handling
+        # Convert results to DataFrame for easier handling
+        comparison_result = pd.DataFrame(results)  
 
         # Identify the best model based on a specific validation metric
         best_model_type = comparison_result.sort_values(by=f'Validation {on}').iloc[0]['Model Type']
+        
+        # set the best models information
+        self.best_model_type = best_model_type
         if best_model_type == 'GAM Splines':
             self.best_model = self.best_gam
         elif best_model_type == 'Random Forest':
-            self.best_model = self.best_rf
+            self.best_model = self.best_rf        
 
         if verbose:
             print('=' * 50)
@@ -168,8 +271,8 @@ class CurveNonParamFit:
             print('=' * 50)
 
         if plot:
-            # Plot comparison of the specified metric for different models
-            metric_comparison = comparison_result.set_index('Model Type')[[f'Train {on}', f'Validation {on}']].sort_values(f'Validation {on}')
+            # Plot comparison of the specified metric for different models            
+            metric_comparison = comparison_result.sort_values(f'Validation {on}').set_index('Model Type')[[f'Train {on}', f'Validation {on}']]
             _, ax = plt.subplots(figsize=(10, 5))
             metric_comparison.plot(kind='barh', ax=ax)
             ax.set_xlabel(on)
@@ -179,6 +282,9 @@ class CurveNonParamFit:
         return best_model_type, comparison_result     
 
     def plot_best(self):
+        """
+        A function to plot the best model's predictions.
+        """
         if not hasattr(self, 'best_model'):
             self.compare_models()
         
@@ -200,6 +306,21 @@ class CurveNonParamFit:
         plt.show()
 
     def predict_best(self, model, X=None):
+        """
+        A function to predict the best model's output.
+
+        Parameters:
+        -----------
+            model: str
+                The model to use for prediction. Options: 'GAM Splines', 'Random Forest', 'Best Model'.
+            X: pd.DataFrame, default=None
+                The data to predict on. If None, the function will use the training data.
+
+        Returns:
+        --------
+            prediction: pd.DataFrame
+                A DataFrame containing the predictions, upper and lower bounds of the 90% confidence interval.
+        """
         assert model in ['GAM Splines', 'Random Forest', 'Best Model'], "model must be 'GAM Splines', 'Random Forest', or 'Best Model'"
         if not hasattr(self, 'best_model'):
             self.compare_models()
@@ -208,7 +329,10 @@ class CurveNonParamFit:
         else:
             # normalize the data
             X = X / (self.x_max - self.x_min)
-            
+        
+        if model == 'Best Model': 
+            model = self.best_model_type
+
         if model == 'GAM Splines':
             model = self.best_gam
             ypred = model.predict(X)
@@ -220,9 +344,6 @@ class CurveNonParamFit:
             rf_preds_per_tree = np.array([tree.predict(X) for tree in model.estimators_])
             yqlb = np.percentile(rf_preds_per_tree, 5, axis=0)
             yqub = np.percentile(rf_preds_per_tree, 95, axis=0)
-
-        else: 
-            model = self.best_model
         
         prediction = pd.concat([X, pd.DataFrame({'ypred': ypred, 'ypred_upper': yqlb, 'ypred_lower': yqub}, index=X.index)], axis=1)
         return prediction      
@@ -230,6 +351,9 @@ class CurveNonParamFit:
 
 
 class GAMRegressor(BaseEstimator, RegressorMixin):
+    """
+    A class to define a Generalized Additive Model (GAM) regressor using pyGAM.
+    """
     def __init__(self, model_type='linear', n_splines=25, lam=0.6):
         self.model_type = model_type
         self.n_splines = n_splines
