@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 
 from pygam import LinearGAM, LogisticGAM, GammaGAM, s
 from sklearn.ensemble import RandomForestRegressor
@@ -9,6 +8,16 @@ from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import make_scorer, mean_squared_error
 
 from reserves_demand.utils import evaluate_metrics
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set(style='white', font_scale=1)
+plt.rc('axes', titlesize='large')    
+plt.rc('axes', labelsize='large')   
+plt.rc('xtick', labelsize='large')   
+plt.rc('ytick', labelsize='large')   
+plt.rc('legend', fontsize='large')   
+plt.rc('figure', titlesize='x-large') 
 
 class CurveNonParamFit:
     """

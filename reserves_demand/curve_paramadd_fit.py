@@ -7,9 +7,18 @@ from sklearn.model_selection import KFold
 from reserves_demand.utils import evaluate_metrics, perf_metrics
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import Counter
+import itertools
 
 import matplotlib.pyplot as plt
-import itertools
+import seaborn as sns
+sns.set(style='white', font_scale=1)
+plt.rc('axes', titlesize='large')    
+plt.rc('axes', labelsize='large')   
+plt.rc('xtick', labelsize='large')   
+plt.rc('ytick', labelsize='large')   
+plt.rc('legend', fontsize='large')   
+plt.rc('figure', titlesize='x-large') 
+
 
 class CurveParamAdditiveFit:
     """
@@ -114,14 +123,14 @@ class CurveParamAdditiveFit:
         self.search_method = search_method
         
         curves = {
-            "logistic": self._logistic,
-            "redLogistic": self._redLogistic,
-            "fixLogistic": self._fixLogistic,
-            "doubleExp": self._doubleExp,
-            "exponential": self._exponential,
-            "fixExponential": self._fixExponential,
-            "arctan": self._arctan,
-            "linear": self._linear
+            "logistic": self.logistic,
+            "redLogistic": self.redLogistic,
+            "fixLogistic": self.fixLogistic,
+            "doubleExp": self.doubleExp,
+            "exponential": self.exponential,
+            "fixExponential": self.fixExponential,
+            "arctan": self.arctan,
+            "linear": self.linear
         }
         param_names = {
             # Names of parameters for each curve type
@@ -194,7 +203,7 @@ class CurveParamAdditiveFit:
             return funccontrib
         else:
             p2 = other_x.shape[1]
-            exogcontrib = self._gX(other_x, w[-p2:])
+            exogcontrib = self.gX(other_x, w[-p2:])
             return funccontrib + exogcontrib
 
     def curveOpt(self, curvename, x, y, q, winit=None, verbose=False):
@@ -221,9 +230,12 @@ class CurveParamAdditiveFit:
         """Computes the quantile loss for curve fitting."""
         ypred = self.curve(x, w, curvename)
         e = y - ypred
-        return np.maximum(q * e, (q - 1) * e).mean()
+        if q == 0.5:
+            return (e**2).mean()
+        else:
+            return np.maximum(q * e, (q - 1) * e).mean()
 
-    def _run_fold(self, train_index, test_index, columns, curvename):
+    def run_fold(self, train_index, test_index, columns, curvename):
         """Executes a single fold of cross-validation for the given columns and curve."""
         
         X_train, X_test = self.x.iloc[train_index][columns], self.x.iloc[test_index][columns]
@@ -240,7 +252,7 @@ class CurveParamAdditiveFit:
         test_metrics = evaluate_metrics(y_test, y_test_pred)
         return train_metrics, test_metrics
 
-    def _run_cv(self, columns_subset, curvename):
+    def run_cv(self, columns_subset, curvename):
         """Runs cross-validation for the specified columns subset and curve type."""
 
         # Initialize lists to store metrics for all folds
@@ -249,7 +261,7 @@ class CurveParamAdditiveFit:
 
         if self.parallel:
             with ProcessPoolExecutor() as executor:
-                futures = [executor.submit(self._run_fold, train_idx, test_idx, columns_subset, curvename)
+                futures = [executor.submit(self.run_fold, train_idx, test_idx, columns_subset, curvename)
                         for train_idx, test_idx in self.kf.split(self.x)]
                 # Collect results as they complete
                 for future in as_completed(futures):
@@ -258,7 +270,7 @@ class CurveParamAdditiveFit:
                     test_metrics_list.append(test_metrics)
         else:
             for train_idx, test_idx in self.kf.split(self.x):
-                train_metrics, test_metrics = self._run_fold(train_idx, test_idx, columns_subset, curvename)
+                train_metrics, test_metrics = self.run_fold(train_idx, test_idx, columns_subset, curvename)
                 train_metrics_list.append(train_metrics)
                 test_metrics_list.append(test_metrics)
 
@@ -270,14 +282,14 @@ class CurveParamAdditiveFit:
 
         return train_metrics_mean, validation_metrics_mean
 
-    def _find_best_combination(self, combinations, curvename, on):
+    def find_best_combination(self, combinations, curvename, on):
         """Finds the best combination of columns based on the specified performance metric for a specific curve type."""
 
         train_metrics = {}
         validation_metrics = {}
         if self.parallel:
             with ProcessPoolExecutor() as executor:
-                future_to_comb = {executor.submit(self._run_cv, comb, curvename): comb for comb in combinations}
+                future_to_comb = {executor.submit(self.run_cv, comb, curvename): comb for comb in combinations}
                 progress_bar = tqdm(total=len(combinations), desc="", unit=" it")
                 for future in as_completed(future_to_comb):
                     comb = future_to_comb[future]
@@ -291,7 +303,7 @@ class CurveParamAdditiveFit:
             progress_bar.close()
         else:            
             for comb in tqdm(combinations):
-                train_metrics[tuple(comb)], validation_metrics[tuple(comb)] = self._run_cv(comb, curvename)
+                train_metrics[tuple(comb)], validation_metrics[tuple(comb)] = self.run_cv(comb, curvename)
                  
         # Select the combination with the best (minimum) specified validation metric
         if validation_metrics and all(on in metrics for metrics in validation_metrics.values()):
@@ -317,7 +329,7 @@ class CurveParamAdditiveFit:
             # or the main independent variable in the forward setup 
             best_combination = [self.main_indep_var] if self.search_method == 'forward' else [self.main_indep_var] + columns
             
-            best_train_metrics, best_validation_metrics = self._run_cv(best_combination, curvename)
+            best_train_metrics, best_validation_metrics = self.run_cv(best_combination, curvename)
             best_validation_metric_value = best_validation_metrics[on]
 
             while True:
@@ -332,7 +344,7 @@ class CurveParamAdditiveFit:
                     candidate_combinations = [best_combination + [c] for c in columns if c not in best_combination]
                 
                 # Find the best combination from the candidates
-                candidates_best_combination, candidates_best_train_metrics, candidates_best_validation_metrics = self._find_best_combination(candidate_combinations, curvename, on)
+                candidates_best_combination, candidates_best_train_metrics, candidates_best_validation_metrics = self.find_best_combination(candidate_combinations, curvename, on)
                 if candidates_best_validation_metrics[on] < best_validation_metric_value:
                     best_combination, best_train_metrics, best_validation_metrics = candidates_best_combination, candidates_best_train_metrics, candidates_best_validation_metrics
                     best_validation_metric_value = best_validation_metrics[on]
@@ -358,7 +370,7 @@ class CurveParamAdditiveFit:
                 all_combinations = [[self.main_indep_var], [self.main_indep_var] + columns]
             else:
                 all_combinations = [[self.main_indep_var]]
-            best_combination, best_train_metrics, best_validation_metrics = self._find_best_combination(all_combinations, curvename, on)
+            best_combination, best_train_metrics, best_validation_metrics = self.find_best_combination(all_combinations, curvename, on)
 
         # Return the best combination of features and the corresponding training and validation metrics
         return best_combination, best_train_metrics, best_validation_metrics
@@ -457,7 +469,7 @@ class CurveParamAdditiveFit:
             plt.show()
         return variable_percentage
     
-    def _get_params(self, curvename, popt, xcols):
+    def get_params(self, curvename, popt, xcols):
         """Extracts the parameters from the optimized curve parameters."""
         paramnames  = self.param_names[curvename] + xcols
         return {paramnames[_i]: popt[_i] for _i in range(len(paramnames))}           
@@ -554,9 +566,9 @@ class CurveParamAdditiveFit:
         perf_metrics_d = {}
         for curvename in fitted_curves:
             _params = self.best_curves_params[curvename]       
-            params_d[curvename] = pd.concat([pd.Series(self._get_params(curvename, _params['avg'], _params['vars'])), 
-                                            pd.Series(self._get_params(curvename, _params['upper'], _params['vars'])),
-                                            pd.Series(self._get_params(curvename, _params['lower'], _params['vars']))
+            params_d[curvename] = pd.concat([pd.Series(self.get_params(curvename, _params['avg'], _params['vars'])), 
+                                            pd.Series(self.get_params(curvename, _params['upper'], _params['vars'])),
+                                            pd.Series(self.get_params(curvename, _params['lower'], _params['vars']))
                                             ], axis=1, keys = ['avg', 'upper bound', 'lower bound'])
             predictions_d[curvename] = self.predict_best_curve(curvename)
             ypred, yqlb, yqub = predictions_d[curvename]['ypred'], predictions_d[curvename]['ypred_lower'], predictions_d[curvename]['ypred_upper']
@@ -584,39 +596,39 @@ class CurveParamAdditiveFit:
         return perf_metrics_df, predictions_df, param_df
     
     # Helper functions
-    def _gX(self, x, b):
+    def gX(self, x, b):
         """Computes the dot product of x and b for the curve calculations."""
         return np.dot(x, b)
         
     # Various curves follow, call them through curve()
-    def _logistic(self, w, g):
+    def logistic(self, w, g):
         alpha, beta, kappa = w[:3]
         return alpha + kappa / (1 - beta * np.exp(g))
 
-    def _redLogistic(self, w, g):
+    def redLogistic(self, w, g):
         alpha, beta = w[:2]
         return alpha + 1 / (1 - beta * np.exp(g))        
 
-    def _fixLogistic(self, w, g):
+    def fixLogistic(self, w, g):
         alpha = w[0]
         return alpha + 1 / (1 - np.exp(g))
 
-    def _doubleExp(self, w, g):
+    def doubleExp(self, w, g):
         alpha, beta, rho = w[:3]
         return alpha + beta * np.exp(rho * np.exp(g))
 
-    def _exponential(self, w, g):
+    def exponential(self, w, g):
         alpha, beta = w[:2]
         return alpha + beta * np.exp(g)
 
-    def _fixExponential(self, w, g):
+    def fixExponential(self, w, g):
         beta = w[0]
         return beta * np.exp(g)
 
-    def _arctan(self, w, g):
+    def arctan(self, w, g):
         alpha, beta = w[:2]
         return alpha + beta * np.arctan(g)
 
-    def _linear(self, w, g):
+    def linear(self, w, g):
         alpha = w[0]
         return alpha + g
