@@ -101,6 +101,7 @@ class CurveParamAdditiveFit:
         
         # Prepare the y variable
         self.y = data[dep_var]
+        self.dep_var = dep_var
         self.dep_var_name = dep_var_name if dep_var_name is not None else dep_var
         
         # Prepare the x variables
@@ -553,9 +554,94 @@ class CurveParamAdditiveFit:
 
         _params = self.best_curves_params[curvename]       
         ypred, yqlb, yqub, X = self.predict(curvename, X, _params['vars'], _params['avg'], _params['upper'], _params['lower'])
+        
+        # transform back X to the original scale
+        X = X * (self.x_max[X.columns] - self.x_min[X.columns])
         prediction = pd.concat([X, pd.DataFrame({'ypred': ypred, 'ypred_upper': yqlb, 'ypred_lower': yqub}, index=X.index)], axis=1)
         return prediction
     
+    def most_probable_value(self, curvename, known_value, verbose=True):
+        """
+        Estimates the most probable value of a dependent or independent variable using a fitted curve,
+        based on a provided known value. 
+        This method performs linear interpolation between the closest data points or uses boundary values
+        if the known value exceeds the available data range.
+
+        This function is particularly useful when you have a value of one variable and need to estimate
+        the corresponding value of another variable based on the relationship defined by the specified curve.
+
+        Parameters:
+        -----------
+            curvename : str
+                The name of the curve used to obtain the prediction. This curve should already be fitted
+                and should correspond to one of the curves supported by the system.
+            
+            known_value : tuple
+                A tuple containing:
+                - The name of the variable (str) for which the value is known.
+                - The known value (float) of that variable.
+
+                The variable name must be one of the dependent or main independent variables used in the model.
+
+        Returns:
+        --------
+            float
+                The estimated value of the other variable. This could be an interpolated value between data points
+                or a boundary value if the known value is outside the range of the available data.
+        """
+        dep_var = self.dep_var
+        main_indep_var = self.main_indep_var
+        assert known_value[0] in [dep_var, main_indep_var], "known_value[0] must be either dep_var or main_indep_var"
+        
+        # Fetch the predictions and adjust column names
+        predictions_df = self.predict_best_curve(curvename=curvename, X=None)
+        predictions_df.rename(columns={'ypred': dep_var}, inplace=True)
+        
+        # Sort DataFrame by the variable of interest
+        predictions_df.sort_values(by=known_value[0], inplace=True)
+        
+        # Find rows where the known value is just above and below the input value
+        filter_above = predictions_df[known_value[0]] >= known_value[1]
+        filter_below = predictions_df[known_value[0]] <= known_value[1]
+        
+        if not filter_above.any():
+            # If known value is above all available data points
+            boundary_value = predictions_df.iloc[-1]
+            if verbose:
+                print(f"Known value {known_value[1]} is above the highest available value. Using boundary value.")
+            if known_value[0] == main_indep_var:
+                to_return = boundary_value[dep_var]
+            else:
+                to_return = boundary_value[main_indep_var]
+        elif not filter_below.any():
+            # If known value is below all available data points
+            boundary_value = predictions_df.iloc[0]
+            if verbose:
+                print(f"Known value {known_value[1]} is below the lowest available value. Using boundary value.")
+            if known_value[0] == main_indep_var:
+                to_return = boundary_value[dep_var]
+            else:
+                to_return = boundary_value[main_indep_var]
+        
+        above = predictions_df[filter_above].iloc[0]
+        below = predictions_df[filter_below].iloc[-1]
+        
+        x_above, y_above = above[main_indep_var], above[dep_var]
+        x_below, y_below = below[main_indep_var], below[dep_var]
+
+        # Perform linear interpolation
+        if known_value[0] == main_indep_var:
+            y = y_below + (y_above - y_below) * (known_value[1] - x_below) / (x_above - x_below)
+            to_return = y
+        else:
+            x = x_below + (x_above - x_below) * (known_value[1] - y_below) / (y_above - y_below)
+            to_return = x
+        
+        if verbose:
+            imputname = self.dep_var_name if known_value[0] == dep_var else self.main_indep_var_name
+            print(f"Estimated value of {imputname} at {known_value[1]}: {to_return}")
+        return to_return
+        
     def compare_best_curves(self, plot=True, CI = True):
         if self.best_curves_params is None:
             self.fit_best_curves()
