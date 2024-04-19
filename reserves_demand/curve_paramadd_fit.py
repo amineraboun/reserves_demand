@@ -59,22 +59,33 @@ class CurveParamAdditiveFit:
         search_method : str, optional
             The method to use for variable selection. Default is 'backward'.
     
-    Attributes
-    ----------
-        y : pd.Series
-            The dependent variable.
-        x : pd.DataFrame
-            The independent variables.
-        x_min : pd.Series
-            The minimum values of the independent variables.
-        x_max : pd.Series
-            The maximum values of the independent variables.
-        curves : dict
-            A dictionary of curve functions.    
-        param_names : dict
-            A dictionary of parameter names for each curve type.
-        init_params : dict
-            A dictionary of initial parameters for each curve type.
+    Methods:
+    --------
+        cross_validate(curvename, on='RMSE'):
+            Performs cross-validation to find the best combination of variables for the specified curve type.
+        variable_select(on='RMSE', verbose=True, plot=True):
+            Performs variable selection for each curve type and returns the best curve based on the specified metric.
+        indep_vars_occurence(normalize=True, plot=True, title=''):
+            Gives the number of occurrences of each independent variable in the best combinations of variables for each curve.
+        fit_best_curves():
+            Fits the best curve for each curve type based on the selected variables.
+        compare_best_curves(plot=True, CI = True):
+            Compares the best curves for each curve type based on the performance metrics.
+        predict_best_curve(curvename, X=None):
+            Predicts the dependent variable using the best curve for the specified curve type.
+        most_probable_value(curvename, known_value, verbose=True):
+            Estimates the most probable value of a dependent or independent variable using a fitted curve.
+        plot_x_y(title =''):
+            Plots the dependent variable y against all the independent variables x.
+        plot_curve_with_confidence_interval(ypred, yqlb=None, yqub=None, ax = None, title =''):
+            Plots the fitted curve along with the confidence interval.
+
+    Attributes:
+    -----------
+        varselect_result : pd.DataFrame
+            The performance metrics for each curve type.
+        best_curves_params : dict
+            The parameters for each curve type.
     """   
     
     def __init__(self, 
@@ -100,38 +111,38 @@ class CurveParamAdditiveFit:
         data = data.sort_values(main_indep_var).dropna().reset_index(drop=True)        
         
         # Prepare the y variable
-        self.y = data[dep_var]
-        self.dep_var = dep_var
-        self.dep_var_name = dep_var_name if dep_var_name is not None else dep_var
+        self._y = data[dep_var]
+        self._dep_var = dep_var
+        self._dep_var_name = dep_var_name if dep_var_name is not None else dep_var
         
         # Prepare the x variables
         x = data.drop(columns=[dep_var])
         
-        self.main_indep_var = main_indep_var
-        self.main_indep_var_name = main_indep_var_name if main_indep_var_name is not None else main_indep_var
-        self.other_indep_vars = list(x.columns.difference([main_indep_var]))
+        self._main_indep_var = main_indep_var
+        self._main_indep_var_name = main_indep_var_name if main_indep_var_name is not None else main_indep_var
+        self._other_indep_vars = list(x.columns.difference([main_indep_var]))
 
         # Normalize x to make the optimization easier
-        self.x_min = x.min()
-        self.x_max = x.max()
-        self.x_raw = x
-        self.x = x  / (self.x_max - self.x_min)
+        self._x_min = x.min()
+        self._x_max = x.max()
+        self._x_raw = x
+        self._x = x  / (self._x_max - self._x_min)
         
-        self.Q = Q
-        self.nFolds = nFolds
-        self.kf = KFold(n_splits=self.nFolds, shuffle=True, random_state=42)
-        self.parallel = parallel
-        self.search_method = search_method
+        self._Q = Q
+        self._nFolds = nFolds
+        self._kf = KFold(n_splits=self._nFolds, shuffle=True, random_state=42)
+        self._parallel = parallel
+        self._search_method = search_method
         
         curves = {
-            "logistic": self.logistic,
-            "redLogistic": self.redLogistic,
-            "fixLogistic": self.fixLogistic,
-            "doubleExp": self.doubleExp,
-            "exponential": self.exponential,
-            "fixExponential": self.fixExponential,
-            "arctan": self.arctan,
-            "linear": self.linear
+            "logistic": self._logistic,
+            "redLogistic": self._redLogistic,
+            "fixLogistic": self._fixLogistic,
+            "doubleExp": self._doubleExp,
+            "exponential": self._exponential,
+            "fixExponential": self._fixExponential,
+            "arctan": self._arctan,
+            "linear": self._linear
         }
         param_names = {
             # Names of parameters for each curve type
@@ -160,118 +171,98 @@ class CurveParamAdditiveFit:
         else:
             assert all(_c in curves for _c in curves), f"Invalid curve type. Must be one of: {', '.join(curves.keys())}"
         
-        self.curves = {_c: curves[_c] for _c in curves}
-        self.param_names = {_c: param_names[_c] for _c in curves}
-        self.init_params = {_c: init_params[_c] for _c in curves}
+        self._curves = {_c: curves[_c] for _c in curves}
+        self._param_names = {_c: param_names[_c] for _c in curves}
+        self._init_params = {_c: init_params[_c] for _c in curves}
 
         self.varselect_result = pd.DataFrame()
         self.best_curves_params = None
         return None
     
-    def plot_x_y(self, title =''):
-        """Plots the dependent variable y against all the independent variables x."""
-        
-        nplots = self.x_raw.shape[1]
-        ncols = 1 if nplots == 1 else 2
-        nrows = int(np.ceil(nplots/ncols))
-        _ = plt.subplots(nrows,ncols, figsize = (ncols*5, nrows*5))
-        for i, col in enumerate(self.x_raw.columns):
-            ax = plt.subplot(nrows,ncols, i+1)
-            ax.scatter(self.x_raw[col], self.y)
-            ax.set_xlabel(col)
-            ax.set_ylabel(self.dep_var_name)
-        if title == '':
-            title = f"{self.dep_var_name} against independent variables"
-        plt.suptitle(title)        
-        plt.subplots_adjust(top=0.9)
-        plt.tight_layout()
-        plt.show()
-        return None
-        
-    def curve(self, x, w, curvename):
+    def _curve(self, x, w, curvename):
         """Applies the specified curve function to the input data x."""
-        assert curvename in self.curves, f"Invalid curve type. Must be one of: {', '.join(self.curves.keys())}"
+        assert curvename in self._curves, f"Invalid curve type. Must be one of: {', '.join(self._curves.keys())}"
         
-        assert self.main_indep_var in x.columns, f"{self.main_indep_var} not found in the dataset"
-        main_x = x[self.main_indep_var]
-        p1 = len(self.param_names[curvename])
+        assert self._main_indep_var in x.columns, f"{self._main_indep_var} not found in the dataset"
+        main_x = x[self._main_indep_var]
+        p1 = len(self._param_names[curvename])
         # function contribution
-        funccontrib = np.nan_to_num(self.curves[curvename](w[:p1], w[p1]*main_x))
+        funccontrib = np.nan_to_num(self._curves[curvename](w[:p1], w[p1]*main_x))
         
         # other exog variables contribution
-        other_x = x.drop(columns=[self.main_indep_var])
+        other_x = x.drop(columns=[self._main_indep_var])
         if other_x.empty:
             return funccontrib
         else:
             p2 = other_x.shape[1]
-            exogcontrib = self.gX(other_x, w[-p2:])
+            exogcontrib = self._gX(other_x, w[-p2:])
             return funccontrib + exogcontrib
 
-    def curveOpt(self, curvename, x, y, q, winit=None, verbose=False):
+    def _loss(self, w, curvename, x, y, q):
+        """Computes the quantile loss for curve fitting."""
+        ypred = self._curve(x, w, curvename)
+        e = y - ypred
+        if q == 0.5:
+            return (e**2).mean()
+        else:
+            return np.maximum(q * e, (q - 1) * e).mean()
+    
+    def _curveOpt(self, curvename, x, y, q, winit=None, verbose=False):
         """Optimizes the curve parameters for the given data and curve type."""
-        assert curvename in self.curves, f"Invalid curve type: {curvename}"
+        assert curvename in self._curves, f"Invalid curve type: {curvename}"
         
         # Initial parameters setup
         if winit is None:
             M = x.abs().max()
             xinit = -1 / M
-            winit = np.concatenate((self.init_params[curvename], xinit.values))  
+            winit = np.concatenate((self._init_params[curvename], xinit.values))  
         else:
-            assert len(winit) == len(self.init_params[curvename]) + x.shape[1], "Invalid initial parameters"
+            assert len(winit) == len(self._init_params[curvename]) + x.shape[1], "Invalid initial parameters"
 
         # Use minimize for other cases
-        result = minimize(self.loss, winit, args=(curvename, x, y, q))
+        result = minimize(self._loss, winit, args=(curvename, x, y, q))
         popt = result.x
         if verbose and not result.success:
             print(f"Optimization failed for {curvename} curve with message: {result.message}")
 
         return popt
     
-    def loss(self, w, curvename, x, y, q):
-        """Computes the quantile loss for curve fitting."""
-        ypred = self.curve(x, w, curvename)
-        e = y - ypred
-        if q == 0.5:
-            return (e**2).mean()
-        else:
-            return np.maximum(q * e, (q - 1) * e).mean()
-
-    def run_fold(self, train_index, test_index, columns, curvename):
+    def _run_fold(self, train_index, test_index, columns, curvename):
         """Executes a single fold of cross-validation for the given columns and curve."""
         
-        X_train, X_test = self.x.iloc[train_index][columns], self.x.iloc[test_index][columns]
-        y_train, y_test = self.y.iloc[train_index], self.y.iloc[test_index]
+        X_train, X_test = self._x.iloc[train_index][columns], self._x.iloc[test_index][columns]
+        y_train, y_test = self._y.iloc[train_index], self._y.iloc[test_index]
 
         # Fit the model using the specified curve type and predict on both training and testing sets
         # The ross validation is chosen on the mean absolute error loss q=0.5
-        popt = self.curveOpt(curvename, X_train, y_train, 0.5)
-        y_train_pred = self.curve(X_train, popt, curvename)
-        y_test_pred = self.curve(X_test, popt, curvename)
+        popt = self._curveOpt(curvename, X_train, y_train, 0.5)
+        y_train_pred = self._curve(X_train, popt, curvename)
+        y_test_pred = self._curve(X_test, popt, curvename)
 
         # Evaluate and return performance metrics for both sets
         train_metrics = evaluate_metrics(y_train, y_train_pred)
         test_metrics = evaluate_metrics(y_test, y_test_pred)
         return train_metrics, test_metrics
 
-    def run_cv(self, columns_subset, curvename):
+    def _run_cv(self, columns_subset, curvename):
         """Runs cross-validation for the specified columns subset and curve type."""
 
         # Initialize lists to store metrics for all folds
         train_metrics_list = []
         test_metrics_list = []
 
-        if self.parallel:
+        if self._parallel:
             with ProcessPoolExecutor() as executor:
-                futures = [executor.submit(self.run_fold, train_idx, test_idx, columns_subset, curvename)
-                        for train_idx, test_idx in self.kf.split(self.x)]
+                futures = [executor.submit(self._run_fold, train_idx, test_idx, columns_subset, curvename)
+                        for train_idx, test_idx in self._kf.split(self._x)]
                 # Collect results as they complete
                 for future in as_completed(futures):
                     train_metrics, test_metrics = future.result()
                     train_metrics_list.append(train_metrics)
                     test_metrics_list.append(test_metrics)
         else:
-            for train_idx, test_idx in self.kf.split(self.x):
-                train_metrics, test_metrics = self.run_fold(train_idx, test_idx, columns_subset, curvename)
+            for train_idx, test_idx in self._kf.split(self._x):
+                train_metrics, test_metrics = self._run_fold(train_idx, test_idx, columns_subset, curvename)
                 train_metrics_list.append(train_metrics)
                 test_metrics_list.append(test_metrics)
 
@@ -283,14 +274,14 @@ class CurveParamAdditiveFit:
 
         return train_metrics_mean, validation_metrics_mean
 
-    def find_best_combination(self, combinations, curvename, on):
+    def _find_best_combination(self, combinations, curvename, on):
         """Finds the best combination of columns based on the specified performance metric for a specific curve type."""
 
         train_metrics = {}
         validation_metrics = {}
-        if self.parallel:
+        if self._parallel:
             with ProcessPoolExecutor() as executor:
-                future_to_comb = {executor.submit(self.run_cv, comb, curvename): comb for comb in combinations}
+                future_to_comb = {executor.submit(self._run_cv, comb, curvename): comb for comb in combinations}
                 progress_bar = tqdm(total=len(combinations), desc="", unit=" it")
                 for future in as_completed(future_to_comb):
                     comb = future_to_comb[future]
@@ -304,7 +295,7 @@ class CurveParamAdditiveFit:
             progress_bar.close()
         else:            
             for comb in tqdm(combinations):
-                train_metrics[tuple(comb)], validation_metrics[tuple(comb)] = self.run_cv(comb, curvename)
+                train_metrics[tuple(comb)], validation_metrics[tuple(comb)] = self._run_cv(comb, curvename)
                  
         # Select the combination with the best (minimum) specified validation metric
         if validation_metrics and all(on in metrics for metrics in validation_metrics.values()):
@@ -316,36 +307,53 @@ class CurveParamAdditiveFit:
 
         return best_combination, best_train_metrics, best_validation_metrics
 
-
     def cross_validate(self, curvename, on='RMSE'):
-        """Performs cross-validation to find the best combination of variables for the specified curve type."""
+        """
+        Performs cross-validation to find the best combination of variables for the specified curve type.
+        
+        Parameters:
+        -----------
+            curvename : str
+                The name of the curve used for fitting the data. This curve should be one of the supported curves.
+            on : str, optional
+                The performance metric to use for comparison. Default is 'RMSE'.
+
+        Returns:
+        --------
+            best_combination : list
+                The best combination of independent variables for the specified curve type.
+            best_train_metrics : dict
+                The performance metrics on the training set for the best combination.
+            best_validation_metrics : dict
+                The performance metrics on the validation set for the best combination.
+        """
         perf_stats = ['RMSE', 'MAE', 'MAPE', 'R2', 'MSLE', 'MedianAE']
         assert on in perf_stats, f'Performance comparison is made on one of the following metrics {perf_stats}'
-        columns = list(self.other_indep_vars)        
+        columns = list(self._other_indep_vars)        
 
         # Generate combinations based on the specified search method
-        if self.search_method in ['backward', 'forward']:
+        if self._search_method in ['backward', 'forward']:
             
             # Initialize the best combination with the result of all the columns in the backward setup 
             # or the main independent variable in the forward setup 
-            best_combination = [self.main_indep_var] if self.search_method == 'forward' else [self.main_indep_var] + columns
+            best_combination = [self._main_indep_var] if self._search_method == 'forward' else [self._main_indep_var] + columns
             
-            best_train_metrics, best_validation_metrics = self.run_cv(best_combination, curvename)
+            best_train_metrics, best_validation_metrics = self._run_cv(best_combination, curvename)
             best_validation_metric_value = best_validation_metrics[on]
 
             while True:
                 # Generate candidate combinations for the next iteration
-                if self.search_method == 'backward':
-                    _eligb_columns = [c for c in best_combination if c != self.main_indep_var]
+                if self._search_method == 'backward':
+                    _eligb_columns = [c for c in best_combination if c != self._main_indep_var]
                     if len(_eligb_columns) ==0:
-                        candidate_combinations = [[self.main_indep_var]]
+                        candidate_combinations = [[self._main_indep_var]]
                     else:
-                        candidate_combinations = [[self.main_indep_var] + list(comb) for comb in itertools.combinations(_eligb_columns, len(_eligb_columns) - 1)] 
+                        candidate_combinations = [[self._main_indep_var] + list(comb) for comb in itertools.combinations(_eligb_columns, len(_eligb_columns) - 1)] 
                 else:
                     candidate_combinations = [best_combination + [c] for c in columns if c not in best_combination]
                 
                 # Find the best combination from the candidates
-                candidates_best_combination, candidates_best_train_metrics, candidates_best_validation_metrics = self.find_best_combination(candidate_combinations, curvename, on)
+                candidates_best_combination, candidates_best_train_metrics, candidates_best_validation_metrics = self._find_best_combination(candidate_combinations, curvename, on)
                 if candidates_best_validation_metrics[on] < best_validation_metric_value:
                     best_combination, best_train_metrics, best_validation_metrics = candidates_best_combination, candidates_best_train_metrics, candidates_best_validation_metrics
                     best_validation_metric_value = best_validation_metrics[on]
@@ -353,25 +361,25 @@ class CurveParamAdditiveFit:
                     break
 
                 # If no candidate combinations are available, break from the loop
-                if (self.search_method == 'backward'):
+                if (self._search_method == 'backward'):
                     if (not _eligb_columns):
                         break
                 
                 # In forward search, remove selected columns from the list of remaining columns
-                if self.search_method == 'forward' and best_combination:
+                if self._search_method == 'forward' and best_combination:
                     columns = [col for col in columns if col not in best_combination]
                     if not columns:
                         break
 
-        elif self.search_method == 'all_combinations':
+        elif self._search_method == 'all_combinations':
             # Evaluate all possible combinations of columns
             if len(columns) > 1:
-                all_combinations = [[self.main_indep_var]] + [[self.main_indep_var] +list(c) for i in range(1, len(columns) + 1) for c in itertools.combinations(columns, i)]
+                all_combinations = [[self._main_indep_var]] + [[self._main_indep_var] +list(c) for i in range(1, len(columns) + 1) for c in itertools.combinations(columns, i)]
             elif len(columns) == 1:
-                all_combinations = [[self.main_indep_var], [self.main_indep_var] + columns]
+                all_combinations = [[self._main_indep_var], [self._main_indep_var] + columns]
             else:
-                all_combinations = [[self.main_indep_var]]
-            best_combination, best_train_metrics, best_validation_metrics = self.find_best_combination(all_combinations, curvename, on)
+                all_combinations = [[self._main_indep_var]]
+            best_combination, best_train_metrics, best_validation_metrics = self._find_best_combination(all_combinations, curvename, on)
 
         # Return the best combination of features and the corresponding training and validation metrics
         return best_combination, best_train_metrics, best_validation_metrics
@@ -381,9 +389,24 @@ class CurveParamAdditiveFit:
         Performs variable selection for each curve type and returns the best curve based on the specified metric.
         The function also returns the performance metrics for each curve type.
         
+        Parameters:
+        -----------
+            on : str, optional
+                The performance metric to use for comparison. Default is 'RMSE'.
+            verbose : bool, optional
+                Whether to print the results. Default is True.
+            plot : bool, optional
+                Whether to plot the performance comparison. Default is True.
+
+        Returns:
+        --------
+            best_curve : str
+                The best curve based on the specified metric.
+            varselect_result : pd.DataFrame
+                The performance metrics for each curve type.
         """
         results = []
-        for curvename in self.curves.keys():
+        for curvename in self._curves.keys():
             if verbose:
                 print('=' * 50)
                 print(f"Running cross-validation for {curvename} curve")
@@ -470,60 +493,43 @@ class CurveParamAdditiveFit:
             plt.show()
         return variable_percentage
     
-    def get_params(self, curvename, popt, xcols):
+    def _get_params(self, curvename, popt, xcols):
         """Extracts the parameters from the optimized curve parameters."""
-        paramnames  = self.param_names[curvename] + xcols
+        paramnames  = self._param_names[curvename] + xcols
         return {paramnames[_i]: popt[_i] for _i in range(len(paramnames))}           
     
-    def fit_curve(self, curvename, xcols):
+    def _fit_curve(self, curvename, xcols):
         """Fits the curve to the data using a selected list of exogenous variables."""
         # Fit the model with the best combination of variables
-        X = self.x[xcols]
+        X = self._x[xcols]
         # Fit the mean curve        
-        popt = self.curveOpt(curvename, X, self.y, q=0.5)
+        popt = self._curveOpt(curvename, X, self._y, q=0.5)
         # Fit the upper and lower curves for the confidence interval
-        qlb = (1 - self.Q) / 2
+        qlb = (1 - self._Q) / 2
         qub = 1 - qlb
-        popt_up = self.curveOpt(curvename, X, self.y, q=qub, winit = popt)
-        popt_down = self.curveOpt(curvename, X, self.y, q=qlb, winit = popt)
+        popt_up = self._curveOpt(curvename, X, self._y, q=qub, winit = popt)
+        popt_down = self._curveOpt(curvename, X, self._y, q=qlb, winit = popt)
 
         return popt, popt_up, popt_down
 
-    def predict(self, curvename, x, xcols, popt, popt_up, popt_down):
+    def _predict(self, curvename, x, xcols, popt, popt_up, popt_down):
         """Predicts the dependent variable using the fitted curve and the confidence interval."""
         X = x[xcols]
-        ypred = self.curve(X, popt, curvename)
-        yqlb = self.curve(X, popt_down, curvename)
-        yqub = self.curve(X, popt_up, curvename)
+        ypred = self._curve(X, popt, curvename)
+        yqlb = self._curve(X, popt_down, curvename)
+        yqub = self._curve(X, popt_up, curvename)
         return ypred, yqlb, yqub, X
-    
-    def plot_curve_with_confidence_interval(self, ypred, yqlb=None, yqub=None, ax = None, title =''):
-        """Plots the fitted curve along with the confidence interval."""
-        # Plot the data
-        if ax is None:
-            _, ax = plt.subplots(1, 1)
-
-        ax.scatter(self.x_raw[self.main_indep_var], self.y, label='Data')
-        ax.plot(self.x_raw[self.main_indep_var], ypred, 'r-', label='Predicted')
-        ax.set_xlabel(self.main_indep_var_name)
-        ax.set_ylabel(self.dep_var_name)
-        ax.set_title(title)
-
-        if (yqlb is not None) and (yqub is not None):
-            ax.fill_between(self.x_raw[self.main_indep_var], yqlb,
-                            yqub, color='gray', alpha=0.5, label=f'{int(self.Q*100)}% CI')            
-        ax.legend()
-        return ax
 
     def fit_best_curves(self):
+        """Fits the best curve for each curve type based on the selected variables."""
         if self.varselect_result.empty:
             self.variable_select(verbose=False)
         
-        if self.parallel:
+        if self._parallel:
             tasks = [(curvename, self.varselect_result.loc[self.varselect_result['Curve'] == curvename, 'Best Combination'].iloc[0]) for curvename in self.varselect_result['Curve'].unique()]
             _best_params = {}
             with ProcessPoolExecutor() as executor:
-                futures = [executor.submit(self.fit_curve, task[0], task[1]) for task in tasks]
+                futures = [executor.submit(self._fit_curve, task[0], task[1]) for task in tasks]
                 
                 for future, task in zip(futures, tasks):
                     curvename, best_combination = task
@@ -537,26 +543,101 @@ class CurveParamAdditiveFit:
             _best_params = {}
             for curvename in fitted_curves:
                 best_combination = self.varselect_result.loc[self.varselect_result['Curve'] == curvename, 'Best Combination'].values[0]
-                popt, popt_up, popt_down = self.fit_curve(curvename, best_combination)
+                popt, popt_up, popt_down = self._fit_curve(curvename, best_combination)
                 _best_params[curvename] = {'vars':best_combination, 'avg': popt, 'upper':popt_up, 'lower':popt_down}
 
         self.best_curves_params = _best_params
         return _best_params
     
+    def compare_best_curves(self, plot=True, CI = True):
+        """
+        Compares the best curves for each curve type based on the performance metrics.
+        The function also returns the performance metrics, the predictions, and the parameters for each curve type.
+
+        Parameters
+        ----------
+            plot : bool, optional
+                Whether to plot the best curves. Default is True.
+            CI : bool, optional
+                Whether to plot the confidence interval. Default is True.
+            
+        Returns
+        -------
+            perf_metrics_df : pd.DataFrame
+                The performance metrics for each curve type.
+            predictions_df : pd.DataFrame
+                The predictions for each curve type.
+            param_df : pd.DataFrame
+                The parameters for each curve type.
+        """
+        if self.best_curves_params is None:
+            self.fit_best_curves()
+                
+        fitted_curves = self.best_curves_params.keys()
+        predictions_d = {}
+        params_d = {}
+        perf_metrics_d = {}
+        for curvename in fitted_curves:
+            _params = self.best_curves_params[curvename]       
+            params_d[curvename] = pd.concat([pd.Series(self._get_params(curvename, _params['avg'], _params['vars'])), 
+                                            pd.Series(self._get_params(curvename, _params['upper'], _params['vars'])),
+                                            pd.Series(self._get_params(curvename, _params['lower'], _params['vars']))
+                                            ], axis=1, keys = ['avg', 'upper bound', 'lower bound'])
+            predictions_d[curvename] = self.predict_best_curve(curvename)
+            ypred, yqlb, yqub = predictions_d[curvename]['ypred'], predictions_d[curvename]['ypred_lower'], predictions_d[curvename]['ypred_upper']
+            perf_metrics_d[curvename] = perf_metrics(self._y, ypred, yqlb, yqub, self._Q)
+        
+        if plot:
+            curves_l = list(predictions_d.keys())
+            nplots = len(curves_l) 
+            ncols = 2
+            nrows = int(np.ceil(nplots/ncols))
+            plt.subplots(nrows,ncols, figsize = (ncols*5, nrows*5))
+            for i, curvename in enumerate(curves_l):
+                ax = plt.subplot(nrows,ncols, i+1)
+                preds = predictions_d[curvename]
+                if CI:
+                    self.plot_curve_with_confidence_interval(preds['ypred'], preds['ypred_lower'], preds['ypred_upper'], ax, title=curvename) 
+                else :
+                    self.plot_curve_with_confidence_interval(preds['ypred'], ax=ax, title=curvename)
+            plt.tight_layout()
+            plt.show()
+
+        perf_metrics_df = pd.concat(perf_metrics_d, axis=1)
+        param_df = pd.concat(params_d)
+        predictions_df = pd.concat(predictions_d, axis=1)    
+        return perf_metrics_df, predictions_df, param_df
+    
     def predict_best_curve(self, curvename, X=None):
+        """
+        Predicts the dependent variable using the best curve for the specified curve type.
+
+        Parameters:
+        ----------
+            curvename : str
+                The name of the curve used to obtain the prediction. This curve should already be fitted
+                and should correspond to one of the curves supported by the system.
+            X : pd.DataFrame, optional
+                The independent variables to use for prediction. Default is None.
+
+        Returns:
+        -------
+            prediction : pd.DataFrame
+                A DataFrame containing the predicted dependent variable along with the confidence interval.        
+        """
         if self.best_curves_params is None:
             self.fit_best_curves()
         if X is None:
-            X = self.x.copy()
+            X = self._x.copy()
         else:
             # normalize the data
-            X = X / (self.x_max - self.x_min)
+            X = X / (self._x_max - self._x_min)
 
         _params = self.best_curves_params[curvename]       
-        ypred, yqlb, yqub, X = self.predict(curvename, X, _params['vars'], _params['avg'], _params['upper'], _params['lower'])
+        ypred, yqlb, yqub, X = self._predict(curvename, X, _params['vars'], _params['avg'], _params['upper'], _params['lower'])
         
         # transform back X to the original scale
-        X = X * (self.x_max[X.columns] - self.x_min[X.columns])
+        X = X * (self._x_max[X.columns] - self._x_min[X.columns])
         prediction = pd.concat([X, pd.DataFrame({'ypred': ypred, 'ypred_upper': yqlb, 'ypred_lower': yqub}, index=X.index)], axis=1)
         return prediction
     
@@ -589,8 +670,8 @@ class CurveParamAdditiveFit:
                 The estimated value of the other variable. This could be an interpolated value between data points
                 or a boundary value if the known value is outside the range of the available data.
         """
-        dep_var = self.dep_var
-        main_indep_var = self.main_indep_var
+        dep_var = self._dep_var
+        main_indep_var = self._main_indep_var
         assert known_value[0] in [dep_var, main_indep_var], "known_value[0] must be either dep_var or main_indep_var"
         
         # Fetch the predictions and adjust column names
@@ -638,83 +719,112 @@ class CurveParamAdditiveFit:
             to_return = x
         
         if verbose:
-            imputname = self.dep_var_name if known_value[0] == dep_var else self.main_indep_var_name
+            imputname = self._dep_var_name if known_value[0] == dep_var else self._main_indep_var_name
             print(f"Estimated value of {imputname} at {known_value[1]}: {to_return}")
         return to_return
-        
-    def compare_best_curves(self, plot=True, CI = True):
-        if self.best_curves_params is None:
-            self.fit_best_curves()
-                
-        fitted_curves = self.best_curves_params.keys()
-        predictions_d = {}
-        params_d = {}
-        perf_metrics_d = {}
-        for curvename in fitted_curves:
-            _params = self.best_curves_params[curvename]       
-            params_d[curvename] = pd.concat([pd.Series(self.get_params(curvename, _params['avg'], _params['vars'])), 
-                                            pd.Series(self.get_params(curvename, _params['upper'], _params['vars'])),
-                                            pd.Series(self.get_params(curvename, _params['lower'], _params['vars']))
-                                            ], axis=1, keys = ['avg', 'upper bound', 'lower bound'])
-            predictions_d[curvename] = self.predict_best_curve(curvename)
-            ypred, yqlb, yqub = predictions_d[curvename]['ypred'], predictions_d[curvename]['ypred_lower'], predictions_d[curvename]['ypred_upper']
-            perf_metrics_d[curvename] = perf_metrics(self.y, ypred, yqlb, yqub, self.Q)
-        
-        if plot:
-            curves_l = list(predictions_d.keys())
-            nplots = len(curves_l) 
-            ncols = 2
-            nrows = int(np.ceil(nplots/ncols))
-            plt.subplots(nrows,ncols, figsize = (ncols*5, nrows*5))
-            for i, curvename in enumerate(curves_l):
-                ax = plt.subplot(nrows,ncols, i+1)
-                preds = predictions_d[curvename]
-                if CI:
-                    self.plot_curve_with_confidence_interval(preds['ypred'], preds['ypred_lower'], preds['ypred_upper'], ax, title=curvename) 
-                else :
-                    self.plot_curve_with_confidence_interval(preds['ypred'], ax=ax, title=curvename)
-            plt.tight_layout()
-            plt.show()
+    
+    def plot_x_y(self, title =''):
+        """
+        Plots the dependent variable y against all the independent variables x.
 
-        perf_metrics_df = pd.concat(perf_metrics_d, axis=1)
-        param_df = pd.concat(params_d)
-        predictions_df = pd.concat(predictions_d, axis=1)    
-        return perf_metrics_df, predictions_df, param_df
+        Parameters
+        ----------
+            title : str, optional
+                The title of the plot. Default is ''.
+
+        Returns
+        -------
+            None        
+        """
+        
+        nplots = self._x_raw.shape[1]
+        ncols = 1 if nplots == 1 else 2
+        nrows = int(np.ceil(nplots/ncols))
+        _ = plt.subplots(nrows,ncols, figsize = (ncols*5, nrows*5))
+        for i, col in enumerate(self._x_raw.columns):
+            ax = plt.subplot(nrows,ncols, i+1)
+            ax.scatter(self._x_raw[col], self._y)
+            ax.set_xlabel(col)
+            ax.set_ylabel(self._dep_var_name)
+        if title == '':
+            title = f"{self._dep_var_name} against independent variables"
+        plt.suptitle(title)        
+        plt.subplots_adjust(top=0.9)
+        plt.tight_layout()
+        plt.show()
+        return None
+        
+    def plot_curve_with_confidence_interval(self, ypred, yqlb=None, yqub=None, ax = None, title =''):
+        """
+        Plots the fitted curve along with the confidence interval.
+        
+        Parameters
+        ----------
+            ypred : pd.Series
+                The predicted dependent variable.
+            yqlb : pd.Series, optional
+                The lower bound of the confidence interval. Default is None.
+            yqub : pd.Series, optional
+                The upper bound of the confidence interval. Default is None.
+            ax : plt.Axes, optional
+                The axes to use for plotting. Default is None.
+            title : str, optional
+                The title of the plot. Default is ''.
+        
+        Returns
+        -------
+            ax : plt.Axes
+                The axes used for plotting.        
+        """        # Plot the data
+        if ax is None:
+            _, ax = plt.subplots(1, 1)
+
+        ax.scatter(self._x_raw[self._main_indep_var], self._y, label='Data')
+        ax.plot(self._x_raw[self._main_indep_var], ypred, 'r-', label='Predicted')
+        ax.set_xlabel(self._main_indep_var_name)
+        ax.set_ylabel(self._dep_var_name)
+        ax.set_title(title)
+
+        if (yqlb is not None) and (yqub is not None):
+            ax.fill_between(self._x_raw[self._main_indep_var], yqlb,
+                            yqub, color='gray', alpha=0.5, label=f'{int(self._Q*100)}% CI')            
+        ax.legend()
+        return ax
     
     # Helper functions
-    def gX(self, x, b):
+    def _gX(self, x, b):
         """Computes the dot product of x and b for the curve calculations."""
         return np.dot(x, b)
         
     # Various curves follow, call them through curve()
-    def logistic(self, w, g):
+    def _logistic(self, w, g):
         alpha, beta, kappa = w[:3]
         return alpha + kappa / (1 - beta * np.exp(g))
 
-    def redLogistic(self, w, g):
+    def _redLogistic(self, w, g):
         alpha, beta = w[:2]
         return alpha + 1 / (1 - beta * np.exp(g))        
 
-    def fixLogistic(self, w, g):
+    def _fixLogistic(self, w, g):
         alpha = w[0]
         return alpha + 1 / (1 - np.exp(g))
 
-    def doubleExp(self, w, g):
+    def _doubleExp(self, w, g):
         alpha, beta, rho = w[:3]
         return alpha + beta * np.exp(rho * np.exp(g))
 
-    def exponential(self, w, g):
+    def _exponential(self, w, g):
         alpha, beta = w[:2]
         return alpha + beta * np.exp(g)
 
-    def fixExponential(self, w, g):
+    def _fixExponential(self, w, g):
         beta = w[0]
         return beta * np.exp(g)
 
-    def arctan(self, w, g):
+    def _arctan(self, w, g):
         alpha, beta = w[:2]
         return alpha + beta * np.arctan(g)
 
-    def linear(self, w, g):
+    def _linear(self, w, g):
         alpha = w[0]
         return alpha + g
